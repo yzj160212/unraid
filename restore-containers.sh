@@ -123,8 +123,8 @@ get_latest_backup() {
     local latest_timestamp=""
     local latest_file=""
     
-    # 查找最新的备份文件（支持 .tar.gz 和 .tar.zst）
-    for file in "$CONFIG_BACKUP_DIR"/appdata_*.tar.*; do
+    # 查找最新的备份文件
+    for file in "$CONFIG_BACKUP_DIR"/appdata_*.tar.zst; do
         if [ -f "$file" ]; then
             local timestamp=$(basename "$file" | grep -o '[0-9]\{8\}_[0-9]\{6\}')
             if [ -n "$timestamp" ]; then
@@ -147,77 +147,19 @@ get_latest_backup() {
     fi
 }
 
-# 获取需要恢复的备份文件列表
-get_backup_chain() {
-    local target_timestamp=$1
-    local backup_files=()
-    local full_backup=""
-    
-    # 查找最近的全量备份（支持 .tar.gz 和 .tar.zst）
-    for file in "$CONFIG_BACKUP_DIR"/appdata_*.tar.*; do
-        if [ -f "$file" ]; then
-            local timestamp=$(basename "$file" | grep -o '[0-9]\{8\}_[0-9]\{6\}')
-            if [ -n "$timestamp" ] && [ "$timestamp" \< "$target_timestamp" ]; then
-                # 检查是否为全量备份
-                if [[ "$file" == *.tar.zst ]]; then
-                    if zstd -dc "$file" 2>/dev/null | tar -t 2>/dev/null | grep -q "^.*\.$"; then
-                        if [ -z "$full_backup" ] || [ "$timestamp" \> "$(basename "$full_backup" | grep -o '[0-9]\{8\}_[0-9]\{6\}')" ]; then
-                            full_backup=$file
-                        fi
-                    fi
-                else
-                    if tar -tf "$file" 2>/dev/null | grep -q "^.*\.$"; then
-                        if [ -z "$full_backup" ] || [ "$timestamp" \> "$(basename "$full_backup" | grep -o '[0-9]\{8\}_[0-9]\{6\}')" ]; then
-                            full_backup=$file
-                        fi
-                    fi
-                fi
-            fi
-        fi
-    done
-    
-    if [ -z "$full_backup" ]; then
-        log_message "错误: 未找到有效的全量备份"
-        return 1
-    fi
-    
-    backup_files+=("$full_backup")
-    local full_backup_timestamp=$(basename "$full_backup" | grep -o '[0-9]\{8\}_[0-9]\{6\}')
-    
-    # 查找全量备份之后的增量备份
-    for file in "$CONFIG_BACKUP_DIR"/appdata_*.tar.*; do
-        if [ -f "$file" ]; then
-            local timestamp=$(basename "$file" | grep -o '[0-9]\{8\}_[0-9]\{6\}')
-            if [ -n "$timestamp" ] && [ "$timestamp" \> "$full_backup_timestamp" ] && [ "$timestamp" \<= "$target_timestamp" ]; then
-                backup_files+=("$file")
-            fi
-        fi
-    done
-    
-    # 按时间顺序排序备份文件
-    printf "%s\n" "${backup_files[@]}" | sort
-}
-
 # 解压备份文件
 extract_backup() {
     local backup_file=$1
     local target_dir=$2
     
-    if [[ "$backup_file" == *.tar.zst ]]; then
-        log_message "使用 zstd 解压: $(basename "$backup_file")"
-        # 获取CPU核心数并计算线程数
-        local cpu_cores=$(nproc 2>/dev/null || echo 4)
-        local threads=$((cpu_cores * 3 / 4))
-        [ "$threads" -lt 1 ] && threads=1
-        
-        if ! zstd -dc -T$threads "$backup_file" 2>/dev/null | tar -xf - -C "$target_dir" 2>/dev/null; then
-            return 1
-        fi
-    else
-        log_message "使用 gzip 解压: $(basename "$backup_file")"
-        if ! tar -xzf "$backup_file" -C "$target_dir" 2>/dev/null; then
-            return 1
-        fi
+    log_message "使用 zstd 解压: $(basename "$backup_file")"
+    # 获取CPU核心数并计算线程数
+    local cpu_cores=$(nproc 2>/dev/null || echo 4)
+    local threads=$((cpu_cores * 3 / 4))
+    [ "$threads" -lt 1 ] && threads=1
+    
+    if ! zstd -dc -T$threads "$backup_file" 2>/dev/null | tar -xf - -C "$target_dir" 2>/dev/null; then
+        return 1
     fi
     return 0
 }
@@ -225,37 +167,26 @@ extract_backup() {
 # 恢复配置文件
 restore_configs() {
     local timestamp=$1
-    local backup_chain=()
+    local backup_file="$CONFIG_BACKUP_DIR/appdata_${timestamp}.tar.zst"
     
-    # 获取备份链
-    while IFS= read -r backup_file; do
-        backup_chain+=("$backup_file")
-    done < <(get_backup_chain "$timestamp")
-    
-    if [ ${#backup_chain[@]} -eq 0 ]; then
-        log_message "错误: 未找到有效的备份链"
+    if [ ! -f "$backup_file" ]; then
+        log_message "错误: 未找到备份文件: $backup_file"
         return 1
-    fi
+    }
     
-    log_message "找到 ${#backup_chain[@]} 个备份文件需要恢复"
-    log_message "开始恢复备份链..."
+    log_message "开始恢复备份文件..."
     
     # 创建临时恢复目录
     local temp_restore_dir="$TEMP_DIR/restore_$$"
     mkdir -p "$temp_restore_dir"
     
-    # 按顺序应用备份
-    local index=1
-    for backup_file in "${backup_chain[@]}"; do
-        log_message "正在应用备份 ($index/${#backup_chain[@]}): $(basename "$backup_file")"
-        
-        if ! extract_backup "$backup_file" "$temp_restore_dir"; then
-            log_message "! 错误: 备份文件解压失败: $(basename "$backup_file")"
-            rm -rf "$temp_restore_dir"
-            return 1
-        fi
-        ((index++))
-    done
+    # 解压备份文件
+    log_message "正在解压备份文件: $(basename "$backup_file")"
+    if ! extract_backup "$backup_file" "$temp_restore_dir"; then
+        log_message "! 错误: 备份文件解压失败"
+        rm -rf "$temp_restore_dir"
+        return 1
+    fi
     
     # 将恢复的文件移动到目标位置
     if [ -d "$temp_restore_dir/appdata" ]; then
