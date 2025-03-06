@@ -135,9 +135,6 @@ backup_container_state() {
 # 备份整个 appdata 目录
 backup_appdata() {
     local backup_path="$CONFIG_BACKUP_DIR/appdata_${BACKUP_DATE}.tar.zst"
-    local snapshot_file="$CONFIG_BACKUP_DIR/.snapshot"
-    local last_full_backup=""
-    local is_full_backup=false
     
     # 获取CPU核心数
     local cpu_cores=$(nproc 2>/dev/null || echo 4)
@@ -145,55 +142,21 @@ backup_appdata() {
     local threads=$((cpu_cores * 3 / 4))
     [ "$threads" -lt 1 ] && threads=1
     
-    # 检查是否需要进行全量备份
-    # 每周进行一次全量备份，其他时候进行增量备份
-    if [ ! -f "$snapshot_file" ] || [ $(find "$CONFIG_BACKUP_DIR" -name ".snapshot" -mtime +7) ]; then
-        is_full_backup=true
-        log_message "执行全量备份..."
-        # 创建新的 snapshot 文件
-        : > "$snapshot_file"
-    else
-        log_message "执行增量备份..."
-        # 查找最近的全量备份
-        last_full_backup=$(find "$CONFIG_BACKUP_DIR" -name "appdata_*.tar.zst" -mtime -7 | sort -r | head -n 1)
-        if [ -z "$last_full_backup" ]; then
-            is_full_backup=true
-            log_message "未找到最近的全量备份，切换到全量备份..."
-            : > "$snapshot_file"
-        fi
-    fi
-    
     log_message "开始备份 appdata 目录..."
     log_message "源目录: $BASE_DIR"
     log_message "备份文件: $backup_path"
     log_message "使用 zstd 压缩 (线程数: $threads, 压缩级别: 3)"
     
-    # 使用 tar 的增量备份功能，配合 zstd 多线程压缩
-    if $is_full_backup; then
-        if tar --create \
-            --file=- \
-            --listed-incremental="$snapshot_file" \
-            --verbose \
-            -C "$(dirname "$BASE_DIR")" "$(basename "$BASE_DIR")" 2>/dev/null | \
-            zstd -T$threads -3 > "$backup_path"; then
-            log_message "✓ 全量备份完成"
-        else
-            log_message "! 错误: 全量备份失败"
-            return 1
-        fi
+    # 使用 tar 直接进行全量备份，配合 zstd 多线程压缩
+    if tar --create \
+        --file=- \
+        --verbose \
+        -C "$(dirname "$BASE_DIR")" "$(basename "$BASE_DIR")" 2>/dev/null | \
+        zstd -T$threads -3 > "$backup_path"; then
+        log_message "✓ 全量备份完成"
     else
-        if tar --create \
-            --file=- \
-            --listed-incremental="$snapshot_file" \
-            --verbose \
-            -C "$(dirname "$BASE_DIR")" "$(basename "$BASE_DIR")" 2>/dev/null | \
-            zstd -T$threads -3 > "$backup_path"; then
-            log_message "✓ 增量备份完成"
-            log_message "基于全量备份: $(basename "$last_full_backup")"
-        else
-            log_message "! 错误: 增量备份失败"
-            return 1
-        fi
+        log_message "! 错误: 全量备份失败"
+        return 1
     fi
     
     # 显示备份文件大小
