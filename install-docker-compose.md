@@ -1,4 +1,4 @@
-# Docker Compose 安装脚本
+# 一键安装适用于 unraid7.0.1 系统的 Docker Compose 脚本（看这一行就行了，下面废话可以不用看。）
 
 ## 功能简介
 
